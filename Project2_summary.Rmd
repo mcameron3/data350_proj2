@@ -1,0 +1,78 @@
+---
+title: "EDA Project Part 2"
+author: "Data 350"
+date: "Due date: April 13 2026 at midnight (EST)"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Overview
+
+In this portion of the project, you will improve upon your previous EDA report to build an interactive dashboard using Shiny.
+For the report we will use weather data from [Open Metro](https://open-meteo.com/). Specifically the data can be scrapped from this url https://api.open-meteo.com/v1/forecast and the data is open-sourced so no api key is needed.
+
+
+
+## Preparation
+
+1. Study the feedback that your peers gave you to see if they make sense. If so, figure out how to incorporate it into the project. Note that each group member may have received comments from different peers, so gather them.  I will work on returning feedback to each group asap.
+
+2.The EDA projects should have an overall theme, i.e., how do you describe the goal of of your project in 1 or 2 sentences? 
+
+
+## Instruction for your Shiny app
+
+
+1. The app must have an well-organized interface
+2. For the visualization:
+
+    - Each question must have at least on interactive figure
+    - Each questiot must use a different plot type (okay if say quesiton is `geom_point() + geom_smooth()` and question is `geom_boxplot + geom_smooth()`)
+    - Each plot must include at least 4 variables
+    - Please incorporate statistics (correlation and standard error), regression models and histogram distributions into the project.
+
+## Submission
+
+Each group member should please turn in a `RMD` file for the shiny app and a `HTML` file of the compiled application. Also please include a seperate `RMD` file for the post production.
+
+
+## Grading structure
+
+The precise rubric will be published via ELMS. In addition to the criteria from the previous projects, you will be graded on the functionality of your Shiny app and the quality of your questions/report. 
+
+## Group Structure 
+
+> **Optional but recommended:** switching your role from the previous project for a more well-rounded experience.
+
+> **Caution:** Please let me know of communication issues as soon as possible. You are not expected to pick up substantial slacks from your group members. 
+
+
+| Role | Responsibilities |
+|------|----------------|
+| **Project Leader/Manager** | - Guides the overall direction of the EDA project <br> - Organizes workflow, deadlines, communication (with team members and the instructor), and file submission  |
+|||
+| **Data/Stat Lead** | - Performs data cleaning, transformations, and statistical analysis <br>- Provides technical support to others |
+|||
+| **Visualization/Communication Lead** | - Designs clear, well-labeled, and statistically informed figures <br>- Standardizes figures/texts and integrate them into report<br>|
+|||
+| **All Members** | - Each member is responsible for $\geq 1$ question/figure <br> - Each member is responsible for writing a group member review, to be submitted separately |
+
+
+
+
+## Post-production
+
+Each member is required to submit a report including an individual reflection and a group member evaluation. Both will be available only to the instructor/grader. Each report must include the following key information:
+
+- Your roles and your plots (1 paragraph)
+- Summary of your work (1 paragraph)
+- Evaluation of each of your team member's work, i.e., what aspects are done well and what could be improved for each member. (1 paragraph for each member)
+
+
+
+
+
