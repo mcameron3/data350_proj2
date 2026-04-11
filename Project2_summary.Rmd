@@ -9,13 +9,110 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-
 ## Overview
 
 In this portion of the project, you will improve upon your previous EDA report to build an interactive dashboard using Shiny.
 For the report we will use weather data from [Open Metro](https://open-meteo.com/). Specifically the data can be scrapped from this url https://api.open-meteo.com/v1/forecast and the data is open-sourced so no api key is needed.
 
+```{r}
+library(httr)
+library(jsonlite)
+```
 
+```{r}
+base_url <- "https://api.open-meteo.com/v1/forecast"
+
+washington_dc <- list(
+  latitude = 38.9072,
+  longitude = -77.0369
+)
+
+response <- GET(
+  url = base_url,
+  query = list(
+    latitude = washington_dc$latitude,
+    longitude = washington_dc$longitude,
+
+    # hourly variables
+    hourly = paste(
+      "temperature_2m", 
+      "precipitation", 
+      "precipitation_probability",
+      sep = ","
+    ),
+
+    # daily summary variables
+    daily = paste(
+      "temperature_2m_max", 
+      "temperature_2m_min", 
+      "precipitation_sum", 
+      sep = ","
+    ),
+
+    temperature_unit = "fahrenheit",
+    precipitation_unit = "inch",
+    wind_speed_unit = "mph",
+    timezone = "America/New_York",
+    forecast_days = 7
+  )
+)
+
+stop_for_status(response) # throws an error if 4xx / 5xx
+body <- content(response, as = "text", encoding = "UTF-8")
+data <- fromJSON(body, simplifyVector = TRUE)
+
+daily_df <- as.data.frame(data$daily)
+names(daily_df) <- c(
+  "date",
+  "max_temp",
+  "min_temp",
+  "precip_sum"
+)
+
+hourly_df <- as.data.frame(data$hourly)
+names(hourly_df) <- c(
+  "time",
+  "temp_2m",
+  "precip_in",
+  "precip_prob_pct"
+)
+```
+
+```{r}
+# historical data
+washington_dc <- list(
+  latitude  = 38.9072,
+  longitude = -77.0369
+)
+
+response <- GET(
+  url   = "https://archive-api.open-meteo.com/v1/archive",
+  query = list(
+    latitude = washington_dc$latitude,
+    longitude = washington_dc$longitude,
+    start_date = "2024-01-01",
+    end_date = "2024-12-31",
+    hourly = paste("temperature_2m", "precipitation", sep = ","),
+    daily = paste("temperature_2m_max", "temperature_2m_min", "precipitation_sum", sep = ","),
+    temperature_unit = "fahrenheit",
+    precipitation_unit = "inch",
+    wind_speed_unit = "mph",
+    timezone = "America/New_York"
+  )
+)
+
+stop_for_status(response)
+data <- fromJSON(
+  content(response, as = "text", encoding = "UTF-8"),
+  simplifyVector = TRUE
+)
+
+historical_daily_df <- as.data.frame(data$daily)
+names(historical_daily_df) <- c("date", "max_temp", "min_temp", "precip_sum_in")
+
+historical_hourly_df <- as.data.frame(data$hourly)
+names(historical_daily_df) <- c("time", "temp_2m", "precip_in")
+```
 
 ## Preparation
 
@@ -23,9 +120,7 @@ For the report we will use weather data from [Open Metro](https://open-meteo.com
 
 2.The EDA projects should have an overall theme, i.e., how do you describe the goal of of your project in 1 or 2 sentences? 
 
-
 ## Instruction for your Shiny app
-
 
 1. The app must have an well-organized interface
 2. For the visualization:
@@ -39,7 +134,6 @@ For the report we will use weather data from [Open Metro](https://open-meteo.com
 
 Each group member should please turn in a `RMD` file for the shiny app and a `HTML` file of the compiled application. Also please include a seperate `RMD` file for the post production.
 
-
 ## Grading structure
 
 The precise rubric will be published via ELMS. In addition to the criteria from the previous projects, you will be graded on the functionality of your Shiny app and the quality of your questions/report. 
@@ -49,7 +143,6 @@ The precise rubric will be published via ELMS. In addition to the criteria from 
 > **Optional but recommended:** switching your role from the previous project for a more well-rounded experience.
 
 > **Caution:** Please let me know of communication issues as soon as possible. You are not expected to pick up substantial slacks from your group members. 
-
 
 | Role | Responsibilities |
 |------|----------------|
@@ -61,9 +154,6 @@ The precise rubric will be published via ELMS. In addition to the criteria from 
 |||
 | **All Members** | - Each member is responsible for $\geq 1$ question/figure <br> - Each member is responsible for writing a group member review, to be submitted separately |
 
-
-
-
 ## Post-production
 
 Each member is required to submit a report including an individual reflection and a group member evaluation. Both will be available only to the instructor/grader. Each report must include the following key information:
@@ -71,8 +161,3 @@ Each member is required to submit a report including an individual reflection an
 - Your roles and your plots (1 paragraph)
 - Summary of your work (1 paragraph)
 - Evaluation of each of your team member's work, i.e., what aspects are done well and what could be improved for each member. (1 paragraph for each member)
-
-
-
-
-
