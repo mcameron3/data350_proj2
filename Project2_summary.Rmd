@@ -111,7 +111,7 @@ historical_daily_df <- as.data.frame(data$daily)
 names(historical_daily_df) <- c("date", "max_temp", "min_temp", "precip_sum_in")
 
 historical_hourly_df <- as.data.frame(data$hourly)
-names(historical_daily_df) <- c("time", "temp_2m", "precip_in")
+names(historical_hourly_df) <- c("time", "temp_2m", "precip_in")
 ```
 
 ## Preparation
