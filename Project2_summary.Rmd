@@ -111,7 +111,382 @@ historical_daily_df <- as.data.frame(data$daily)
 names(historical_daily_df) <- c("date", "max_temp", "min_temp", "precip_sum_in")
 
 historical_hourly_df <- as.data.frame(data$hourly)
-names(historical_hourly_df) <- c("time", "temp_2m", "precip_in")
+names(historical_daily_df) <- c("time", "temp_2m", "precip_in")
+```
+
+```{r}
+# install packages (valentina)
+library(shiny)
+library(httr)
+library(jsonlite)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(scales)
+```
+
+```{r}
+# scrape data (valentina)
+FIRST_YEAR <- 1940L
+LAST_YEAR  <- 2026L
+
+DC <- list(latitude = 38.9072, longitude = -77.0369)
+
+STD_MD <- c(Spring = "03-01", Summer = "06-01", Autumn = "09-01", Winter = "12-01")
+
+season_colors <- c(Spring = "#5DB88A", Summer = "#E8924A", Autumn = "#C06030", Winter = "#5B8DC4")
+
+fetch_archive_slice <- function(start_date, end_date) {
+  resp <- GET(
+    url   = "https://archive-api.open-meteo.com/v1/archive",
+    query = list(
+      latitude = DC$latitude,
+      longitude = DC$longitude,
+      start_date = format(start_date, "%Y-%m-%d"),
+      end_date = format(end_date,   "%Y-%m-%d"),
+      daily = paste("temperature_2m_max", "temperature_2m_min", "precipitation_sum", sep = ","),
+      temperature_unit = "fahrenheit",
+      precipitation_unit = "inch",
+      timezone = "America/New_York"
+    )
+  )
+  stop_for_status(resp)
+  raw <- fromJSON(content(resp, as = "text", encoding = "UTF-8"), simplifyVector = TRUE)
+  df <- as.data.frame(raw$daily)
+  names(df) <- c("date", "max_temp", "min_temp", "precip_sum")
+  df$date <- as.Date(df$date)
+  df$avg_temp <- (df$max_temp + df$min_temp) / 2
+  df
+}
+
+fetch_historical <- function(progress = NULL) {
+  chunk_size <- 10L
+  starts <- seq(FIRST_YEAR, LAST_YEAR, by = chunk_size)
+  n <- length(starts)
+  chunks <- vector("list", n)
+
+  for (i in seq_along(starts)) {
+    y0 <- starts[i]
+    y1 <- min(y0 + chunk_size - 1L, LAST_YEAR)
+    sd <- as.Date(paste0(y0, "-01-01"))
+    ed <- min(as.Date(paste0(y1, "-12-31")), Sys.Date() - 1)
+
+    if (!is.null(progress)) {
+      progress$set(
+        value = (i - 1) / n,
+        message = paste0("Fetching ", y0, "\u2013", y1, "\u2026")
+      )
+    }
+
+    chunks[[i]] <- tryCatch(
+      fetch_archive_slice(sd, ed),
+      error = function(e) {
+        warning("Chunk ", y0, "\u2013", y1, " failed: ", conditionMessage(e))
+        NULL
+      }
+    )
+  }
+
+  bind_rows(Filter(Negate(is.null), chunks))
+}
+```
+
+```{r}
+# process data (valentina)
+
+classify_seasons <- function(df, window = 7, summer_thresh = 65, winter_thresh = 41) {
+  df <- df |> arrange(date)
+  
+  df$roll_avg <- as.numeric(stats::filter(df$avg_temp, rep(1 / window, window), sides = 1))
+  
+  df <- df[!is.na(df$roll_avg), ]
+  
+  df$thermal <- dplyr::case_when(
+    df$roll_avg >= summer_thresh ~ "Summer",
+    df$roll_avg < winter_thresh ~ "Winter",
+    TRUE ~ "Transition"
+  )
+
+  df$year <- lubridate::year(df$date)
+
+  df <- df |>
+    group_by(year) |>
+    group_modify(function(yr, key) {
+      peak_idx <- which.max(yr$roll_avg)
+      yr$season <- yr$thermal
+      yr$season[seq_len(peak_idx)][yr$thermal[seq_len(peak_idx)] == "Transition"] <- "Spring"
+      if (peak_idx < nrow(yr)) {
+        tail_idx <- seq(peak_idx + 1L, nrow(yr))
+        yr$season[tail_idx][yr$thermal[tail_idx] == "Transition"] <- "Autumn"
+      }
+      yr
+    }) |>
+    ungroup()
+
+  df
+}
+
+# determine how long a season lasts for 
+
+season_runs <- function(df) {
+  df |>
+    arrange(date) |>
+    mutate(grp = cumsum(season != lag(season, default = ""))) |>
+    group_by(grp, season) |>
+    summarise(
+      year = first(lubridate::year(date)),
+      start = min(date),
+      end = max(date),
+      duration = as.integer(end - start) + 1L,
+      mean_temp = round(mean(avg_temp, na.rm = TRUE), 1),
+      .groups = "drop"
+    ) |>
+    arrange(start)
+}
+
+# calculate statistics for each season
+
+yearly_season_stats <- function(runs_df) {
+  runs_df |>
+    group_by(year, season) |>
+    slice_min(start, n = 1, with_ties = FALSE) |>
+    ungroup() |>
+    mutate(
+      std_md = STD_MD[season],
+      std_date = as.Date(paste0(year, "-", std_md)),
+      deviation = as.integer(start - std_date)
+    ) |>
+    select(year, season, start, end, duration, mean_temp, std_date, deviation)
+}
+```
+
+```{r}
+# build ui (valentina)
+
+theme_app <- function(base_size = 13) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(color = "#e0ddd4"),
+      plot.background = element_rect(fill = "#fff", color = NA),
+      panel.background = element_rect(fill = "#fff", color = NA),
+      plot.subtitle = element_text(color = "#888780", size = 11),
+      plot.caption = element_text(color = "#888780", size = 10)
+    )
+}
+
+ui <- fluidPage(
+  tags$head(tags$style(HTML("
+    body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; background: #f8f7f4; color: #2c2c2a; }
+    .well { background: #fff; border: 1px solid #e0ddd4; border-radius: 10px; box-shadow: none; }
+    h2 { font-weight: 500; font-size: 22px; margin-top: 6px; }
+    .section-label { font-size: 12px; color: #888780; text-transform: uppercase; letter-spacing: .05em; margin: 18px 0 6px; }
+  "))),
+
+  titlePanel(div(
+    h2("Does each season start on time? How long does it last?"),
+    tags$p(style = "color:#888780;font-size:14px;margin-top:2px;", "Please wait a few seconds to load all of the data!")
+  )),
+
+  sidebarLayout(
+    sidebarPanel(
+      width = 3,
+
+      div(class = "section-label", "Status"),
+      textOutput("last_updated"),
+      br(),
+      actionButton("load_data", "\u21bb  Refresh data", style = "width:100%;border-radius:8px;"),
+
+      hr(),
+
+      div(class = "section-label", "Season definition"),
+      sliderInput("summer_thresh", "Summer threshold (\u00b0F)", min = 55, max = 80, value = 65, step = 1),
+      sliderInput("winter_thresh", "Winter threshold (\u00b0F)", min = 28, max = 50, value = 41, step = 1)
+    ),
+
+    mainPanel(
+      width = 9,
+
+      tabsetPanel(
+        id = "tabs",
+
+        tabPanel("Temperature Timeline", br(), plotOutput("temp_plot")),
+
+        tabPanel(
+          "Arrival Trends",
+          br(),
+          plotOutput("deviation_trend_plot", height = "420px"),
+          br(),
+          div(style = "font-size:13px;color:#5f5e5a;",
+            "Each point represents how many days early (negative) or late (positive) a season arrived compared to its meteorological standard start (Mar 1 for spring, Jun 1 for sumer, Sep 1 for fall, Dec 1 for winter).",
+            "The smooth band shows the long-run trend."
+          )
+        ),
+
+        tabPanel(
+          "Duration Trends",
+          br(),
+          plotOutput("duration_trend_plot", height = "420px"),
+          br(),
+          div(style = "font-size:13px;color:#5f5e5a;",
+            "Line shows the length of each season's primary run per year.",
+            "Dashed line = long-run average duration for that season."
+          )
+        )
+      )
+    )
+  )
+)
+
+# server stuff 
+
+server <- function(input, output, session) {
+
+  hist_data <- reactiveVal(NULL)
+  last_fetch <- reactiveVal(NULL)
+
+  do_load <- function() {
+    progress <- shiny::Progress$new(session, min = 0, max = 1)
+    on.exit(progress$close())
+    progress$set(message = "Connecting to Open-Meteo\u2026", value = 0)
+
+    tryCatch({
+      hist_data(fetch_historical(progress = progress))
+      last_fetch(Sys.time())
+      progress$set(value = 1, message = "Done.")
+    }, error = function(e) {
+      showNotification(paste("Error:", conditionMessage(e)), type = "error", duration = 10)
+    })
+  }
+
+  # load data 
+  observe({
+    do_load()
+  }) |> bindEvent(TRUE, once = TRUE, ignoreInit = FALSE)
+
+  # refresh data 
+  observeEvent(input$load_data, { do_load() })
+
+  output$last_updated <- renderText({
+    req(last_fetch())
+    paste("Updated:", format(last_fetch(), "%H:%M:%S"))
+  })
+
+  # classify data 
+
+  classified <- reactive({
+    req(hist_data())
+    classify_seasons(hist_data(), window = 7, summer_thresh = input$summer_thresh, winter_thresh = input$winter_thresh)
+  })
+
+  runs <- reactive({
+    req(classified())
+    season_runs(classified())
+  })
+
+  yr_stats <- reactive({
+    req(runs())
+    yearly_season_stats(runs())
+  })
+
+  # tab 1: temperature trends 
+
+  output$temp_plot <- renderPlot({
+    req(classified())
+    df <- classified()
+
+    df$doy <- as.integer(format(df$date, "%j"))
+
+    band_df <- df |>
+      group_by(year, doy) |>
+      summarise(season = season[1], .groups = "drop") |>
+      arrange(year, doy) |>
+      group_by(year) |>
+      mutate(grp = cumsum(season != lag(season, default = ""))) |>
+      group_by(year, grp, season) |>
+      summarise(xmin = min(doy) - 0.5, xmax = max(doy) + 0.5, .groups = "drop")
+
+    std_doy <- data.frame(
+      season = names(STD_MD),
+      doy = as.integer(format(as.Date(paste0("2001-", STD_MD)), "%j"))
+    )
+
+    month_breaks <- as.integer(format(as.Date(paste0("2001-", sprintf("%02d", 1:12), "-01")), "%j"))
+    month_labels <- c("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec")
+
+    n_years <- length(unique(df$year))
+
+    ggplot(df, aes(x = doy, y = avg_temp)) +
+      geom_rect(data = band_df, aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = season), inherit.aes = FALSE, alpha = 0.18) +
+      scale_fill_manual(values = season_colors, name = NULL) +
+      geom_line(color = "#2c2c2a", linewidth = 0.4) +
+      geom_vline(data = std_doy, aes(xintercept = doy), color = "#888780", linetype = "dashed", linewidth = 0.4) +
+      facet_wrap(~ year, ncol = 1, strip.position = "left") +
+      scale_x_continuous(breaks = month_breaks, labels = month_labels, expand = c(0, 0)) +
+      scale_y_continuous(breaks = c(20, 50, 80)) +
+      labs(x = "Month", y = "Year", title = "Daily Average Temperatures by Year (1940-2026)") +
+      theme_app() +
+      theme(
+        legend.position = "bottom",
+        strip.text.y.left = element_text(size = 7, angle = 0, hjust = 1, margin = margin(r = 4)),
+        panel.spacing.y = unit(1, "pt"),
+        axis.text.y = element_text(size = 6),
+        axis.text.x = element_text(size = 8),
+        panel.grid.major = element_blank()
+      )
+  }, height = function() 18 * length(unique(classified()$year)))
+
+  # tab 2: arrival trends
+
+  output$deviation_trend_plot <- renderPlot({
+    req(yr_stats())
+    df <- yr_stats()[!is.na(yr_stats()$deviation), ]
+
+    ggplot(df, aes(x = year, y = deviation, color = season)) +
+      geom_hline(yintercept = 0, color = "#b4b2a9", linewidth = 0.5, linetype = "dashed") +
+      geom_point(alpha = 0.55, size = 1.8) +
+      geom_smooth(method = "loess", span = 0.35, se = TRUE, linewidth = 1, alpha = 0.15) +
+      facet_wrap(~ season, ncol = 2, scales = "free_y") +
+      scale_color_manual(values = season_colors, guide = "none") +
+      scale_x_continuous(breaks = pretty_breaks(6)) +
+      labs(
+        x = "Year",
+        y = "Deviation From Standard Start (Days)",
+        title = "Season Arrival Since 1940"
+      ) +
+      theme_app() +
+      theme(strip.text = element_text(face = "bold", size = 12), panel.spacing = unit(1.2, "lines"))
+  })
+
+  # tab 3: duration trends 
+
+  output$duration_trend_plot <- renderPlot({
+    req(yr_stats())
+    df <- yr_stats()[!is.na(yr_stats()$duration), ]
+
+    avg_dur <- df |>
+      group_by(season) |>
+      summarise(mean_dur = mean(duration, na.rm = TRUE), .groups = "drop")
+
+    ggplot(df, aes(x = year, y = duration, color = season)) +
+      geom_line(alpha = 0.45, linewidth = 0.6) +
+      geom_point(alpha = 0.55, size = 1.4) +
+      geom_smooth(method = "loess", span = 0.35, se = TRUE, linewidth = 1, alpha = 0.12) +
+      geom_hline(data = avg_dur, aes(yintercept = mean_dur, color = season), linetype = "dashed", linewidth = 0.6, alpha = 0.7) +
+      facet_wrap(~ season, ncol = 2, scales = "free_y") +
+      scale_color_manual(values = season_colors, guide = "none") +
+      scale_x_continuous(breaks = pretty_breaks(6)) +
+      labs(
+        x = "Year",
+        y = "Duration (Days)",
+        title = "Season Duration Since 1940"
+      ) +
+      theme_app() +
+      theme(strip.text = element_text(face = "bold", size = 12), panel.spacing = unit(1.2, "lines"))
+  })
+}
+
+shinyApp(ui, server)
 ```
 
 ## Preparation
