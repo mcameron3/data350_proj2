@@ -1,0 +1,421 @@
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+## Overview
+
+In this portion of the project, you will improve upon your previous EDA report to build an interactive dashboard using Shiny.
+For the report we will use weather data from [Open Metro](https://open-meteo.com/). Specifically the data can be scrapped from this url https://api.open-meteo.com/v1/forecast and the data is open-sourced so no api key is needed.
+
+```{r libraries}
+library(httr)
+library(jsonlite)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(zoo)
+library(shiny)
+```
+
+
+```{r fetch-forecast}
+response <- GET(
+  url = "https://api.open-meteo.com/v1/forecast",
+  query = list(
+    latitude           = 38.9072,
+    longitude          = -77.0369,
+    hourly             = paste("temperature_2m", "precipitation",
+                               "precipitation_probability", sep = ","),
+    daily              = paste("temperature_2m_max", "temperature_2m_min",
+                               "precipitation_sum", sep = ","),
+    temperature_unit   = "fahrenheit",
+    precipitation_unit = "inch",
+    wind_speed_unit    = "mph",
+    timezone           = "America/New_York",
+    forecast_days      = 7
+  )
+)
+stop_for_status(response)
+data <- fromJSON(content(response, as = "text", encoding = "UTF-8"),
+                 simplifyVector = TRUE)
+
+daily_df <- as.data.frame(data$daily)
+names(daily_df) <- c("date", "max_temp", "min_temp", "precip_sum")
+
+hourly_df <- as.data.frame(data$hourly)
+names(hourly_df) <- c("time", "temp_2m", "precip_in", "precip_prob_pct")
+```
+
+
+```{r fetch-historical}
+fetch_year <- function(year) {
+  resp <- GET(
+    "https://archive-api.open-meteo.com/v1/archive",
+    query = list(
+      latitude           = 38.9072,
+      longitude          = -77.0369,
+      start_date         = paste0(year, "-01-01"),
+      end_date           = paste0(year, "-12-31"),
+      daily              = paste("temperature_2m_max", "temperature_2m_min",
+                                 "precipitation_sum", sep = ","),
+      hourly             = paste("temperature_2m", "precipitation", sep = ","),
+      temperature_unit   = "fahrenheit",
+      precipitation_unit = "inch",
+      timezone           = "America/New_York"
+    )
+  )
+  stop_for_status(resp)
+  d <- fromJSON(content(resp, as = "text", encoding = "UTF-8"),
+                simplifyVector = TRUE)
+
+  daily <- as.data.frame(d$daily)
+  names(daily) <- c("date", "max_temp", "min_temp", "precip_sum_in")
+
+  hourly <- as.data.frame(d$hourly)
+  names(hourly) <- c("time", "temp_2m", "precip_in")
+
+  list(daily = daily, hourly = hourly)
+}
+
+years <- seq(1950, 2024, by = 5)
+
+all_daily  <- list()
+all_hourly <- list()
+
+for (yr in years) {
+  message("Fetching ", yr, "...")
+  result <- fetch_year(yr)
+  all_daily[[as.character(yr)]]  <- result$daily
+  all_hourly[[as.character(yr)]] <- result$hourly
+  Sys.sleep(0.5)
+}
+
+historical_daily_df  <- bind_rows(all_daily)
+historical_hourly_df <- bind_rows(all_hourly)
+```
+
+
+```{r prep}
+# Daily data
+historical_daily_df$date      <- as.Date(historical_daily_df$date)
+historical_daily_df$range_f   <- historical_daily_df$max_temp - historical_daily_df$min_temp
+historical_daily_df$month     <- month(historical_daily_df$date, label = TRUE, abbr = TRUE)
+historical_daily_df$month_num <- month(historical_daily_df$date)
+month_lookup <- setNames(1:12, month.abb)
+
+historical_daily_df$year      <- year(historical_daily_df$date)
+
+# Hourly data — explicit format to handle ISO 8601 timestamps from the API
+historical_hourly_df$time <- as.POSIXct(
+  historical_hourly_df$time,
+  format = "%Y-%m-%dT%H:%M",
+  tz     = "America/New_York"
+)
+historical_hourly_df$hour <- as.integer(hour(historical_hourly_df$time))
+historical_hourly_df$date <- as.Date(historical_hourly_df$time,
+                                      tz = "America/New_York")
+historical_hourly_df$year  <- year(historical_hourly_df$date)
+historical_hourly_df$month <- month(historical_hourly_df$date, 
+                                     label = TRUE, abbr = TRUE)
+
+# Annual summary — one row per sampled year, used for the trend tab
+annual_summary <- historical_daily_df %>%
+  group_by(year) %>%
+  summarise(
+    avg_range    = mean(range_f, na.rm = TRUE),
+    sd_range     = sd(range_f, na.rm = TRUE),
+    extreme_days = sum(range_f > 30, na.rm = TRUE),
+    avg_max      = mean(max_temp, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r shiny-app}
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+fetch_forecast <- function() {
+  resp <- GET(
+    "https://api.open-meteo.com/v1/forecast",
+    query = list(
+      latitude           = 38.9072,
+      longitude          = -77.0369,
+      daily              = paste("temperature_2m_max", "temperature_2m_min",
+                                 "precipitation_sum", sep = ","),
+      temperature_unit   = "fahrenheit",
+      precipitation_unit = "inch",
+      timezone           = "America/New_York",
+      forecast_days      = 7
+    )
+  )
+  stop_for_status(resp)
+  d <- fromJSON(content(resp, as = "text", encoding = "UTF-8"),
+                simplifyVector = TRUE)
+  daily <- as.data.frame(d$daily)
+  names(daily) <- c("date", "max_temp", "min_temp", "precip_sum_in")
+  daily$date    <- as.Date(daily$date)
+  daily$range_f <- daily$max_temp - daily$min_temp
+  daily$month   <- month(daily$date, label = TRUE, abbr = TRUE)
+  daily$year    <- year(daily$date)
+  daily
+}
+
+valueBoxUI <- function(id, label) {
+  column(4,
+    wellPanel(
+      style = "text-align:center; padding:10px",
+      h4(textOutput(id), style = "margin:0"),
+      p(label, style = "margin:0; color:grey; font-size:12px")
+    )
+  )
+}
+
+# ── UI ────────────────────────────────────────────────────────────────────────
+
+ui <- fluidPage(
+  titlePanel("Has Climate Change Made DC's Weather More Extreme?"),
+  sidebarLayout(
+    sidebarPanel(
+      width = 3,
+      h4("Controls"),
+      sliderInput("year_range", "Year range",
+            min   = 1950,
+            max   = 2024,
+            value = c(1950, 2024),
+            step  = 5,
+            sep   = ""),
+      selectInput("months", "Filter by month",
+                  choices  = month.abb,
+                  selected = month.abb,
+                  multiple = TRUE),
+      actionButton("fetch_btn", "Fetch 7-day forecast",
+                   class = "btn-primary", width = "100%"),
+      hr(),
+      h5("How to read this"),
+      p("Daily range = max − min temp on a given day. A higher value means
+        a more extreme swing between the coldest and hottest parts of the day.",
+        style = "font-size:12px; color:grey")
+    ),
+    mainPanel(
+      width = 9,
+      tabsetPanel(
+        tabPanel("Monthly spread",
+          br(),
+          plotOutput("plot_monthly_box", height = "400px")
+        ),
+        tabPanel("IQR comparison",
+          br(),
+          plotOutput("plot_iqr", height = "400px"),
+          br(),
+          uiOutput("iqr_stats"),
+          ),
+        tabPanel("Day-to-day swings",
+          br(),
+          plotOutput("plot_day_to_day", height = "400px"),
+          p("Average absolute temperature change from one day to the next, by month.
+            Higher bars mean the weather tends to flip more dramatically day-to-day.",
+          style = "color:grey; font-size:12px")
+        )
+      )
+    )
+  )
+)
+
+# ── Server ────────────────────────────────────────────────────────────────────
+
+server <- function(input, output, session) {
+
+daily_data_raw <- reactive({
+  historical_daily_df %>%
+    filter(
+      year >= input$year_range[1],
+      year <= input$year_range[2],
+      month_num %in% month_lookup[input$months]
+    )
+})
+
+hourly_data_raw <- reactive({
+  historical_hourly_df %>%
+    filter(
+      year  >= input$year_range[1],
+      year  <= input$year_range[2],
+      month(historical_hourly_df$date) %in% month_lookup[input$months]
+    )
+})
+
+# Wait 500ms after last input change before recomputing
+daily_data  <- debounce(daily_data_raw,  500)
+hourly_data <- debounce(hourly_data_raw, 500)
+
+  annual_data <- reactive({
+    annual_summary %>%
+      filter(year >= input$year_range[1],
+             year <= input$year_range[2])
+  })
+
+  # isolate() means the forecast won't re-fetch every time other inputs change
+  forecast_data <- eventReactive(input$fetch_btn, {
+    tryCatch(fetch_forecast(), error = function(e) NULL)
+  }, ignoreNULL = FALSE)
+
+
+
+  # ── Tab 3: monthly boxplots ───────────────────────────────────────────────
+  output$plot_monthly_box <- renderPlot({
+    req(nrow(daily_data()) > 0)
+    ggplot(daily_data(), aes(x = factor(year), y = range_f)) +
+      geom_boxplot(fill = "steelblue", alpha = 0.6, outlier.size = 1) +
+      labs(
+        title    = "Distribution of daily temperature range by year",
+        x = NULL, y = "°F range"
+      ) +
+      theme_minimal(base_size = 13)
+  })
+  
+  
+  # ── Tab: IQR comparison ───────────────────────────────────────────────────
+output$plot_iqr <- renderPlot({
+  req(nrow(daily_data()) > 0)
+
+  daily_data() %>%
+    group_by(year) %>%
+    summarise(
+      iqr        = IQR(range_f, na.rm = TRUE),
+      q25        = quantile(range_f, 0.25, na.rm = TRUE),
+      q75        = quantile(range_f, 0.75, na.rm = TRUE),
+      median_range = median(range_f, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    ggplot(aes(x = year)) +
+    geom_ribbon(aes(ymin = q25, ymax = q75), fill = "steelblue", alpha = 0.3) +
+    geom_line(aes(y = median_range), colour = "steelblue", linewidth = 1) +
+    geom_point(aes(y = iqr), colour = "tomato", size = 2.5) +
+    geom_smooth(aes(y = iqr), method = "lm", se = FALSE,
+                colour = "tomato", linetype = "dashed", linewidth = 0.9) +
+    labs(
+      title    = "IQR of daily temperature range by year",
+      subtitle = "Red dots = IQR per year with trend line. Blue ribbon = Q25–Q75 band. Blue line = median.",
+      x = "Year", y = "°F"
+    ) +
+    theme_minimal(base_size = 13)
+})
+
+output$iqr_stats <- renderUI({
+  df <- daily_data() %>%
+    group_by(year) %>%
+    summarise(iqr = IQR(range_f, na.rm = TRUE), .groups = "drop")
+
+  model <- lm(iqr ~ year, data = df)
+  s     <- summary(model)
+  coef  <- s$coefficients
+  slope <- coef[2, 1]
+  pval  <- coef[2, 4]
+  r2    <- s$r.squared
+
+  tagList(
+    p(strong("Slope (per year):"), sprintf("%.4f °F", slope)),
+    p(strong("p-value:"), sprintf("%.4f", pval),
+      if (pval < 0.05) " — statistically significant" else " — not statistically significant"),
+    p(strong("R²:"), sprintf("%.4f", r2)),
+    p(strong(paste("IQR in", min(df$year), ":")), sprintf("%.2f °F", df$iqr[df$year == min(df$year)])),
+    p(strong(paste("IQR in", max(df$year), ":")), sprintf("%.2f °F", df$iqr[df$year == max(df$year)])),
+    p(strong("Total change:"), sprintf("%.2f °F over %d years",
+      df$iqr[df$year == max(df$year)] - df$iqr[df$year == min(df$year)],
+      max(df$year) - min(df$year)))
+  )
+})
+
+  output$vb_avg <- renderText({
+    sprintf("%.1f °F", mean(daily_data()$range_f, na.rm = TRUE))
+  })
+  output$vb_max <- renderText({
+    sprintf("%.1f °F", max(daily_data()$range_f, na.rm = TRUE))
+  })
+  output$vb_volatile <- renderText({
+    daily_data() %>%
+      group_by(month) %>%
+      summarise(sd_range = sd(range_f, na.rm = TRUE), .groups = "drop") %>%
+      slice_max(sd_range, n = 1) %>%
+      pull(month) %>%
+      as.character()
+  })
+  
+# ── Tab 4: day-to-day swings ──────────────────────────────────────────────
+output$plot_day_to_day <- renderPlot({
+  req(nrow(daily_data()) > 1)
+
+  daily_data() %>%
+    arrange(date) %>%
+    mutate(
+      day_to_day = abs(max_temp - lag(max_temp)),
+      date_diff  = as.integer(date - lag(date))
+    ) %>%
+    filter(!is.na(day_to_day), date_diff == 1) %>%
+    group_by(year) %>%
+    summarise(avg_swing = mean(day_to_day, na.rm = TRUE), .groups = "drop") %>%
+    ggplot(aes(x = year, y = avg_swing, fill = avg_swing)) +
+    geom_col() +
+    scale_fill_gradient(low = "steelblue", high = "tomato") +
+    labs(
+      title    = "Average day-to-day temperature change by year",
+      subtitle = "Absolute change in daily max temp from one day to the next",
+      x = "Year", y = "°F change"
+    ) +
+    theme_minimal(base_size = 13) +
+    theme(legend.position = "none")
+})
+
+}
+
+shinyApp(ui, server)
+```
+
+
+## Preparation
+
+1. Study the feedback that your peers gave you to see if they make sense. If so, figure out how to incorporate it into the project. Note that each group member may have received comments from different peers, so gather them.  I will work on returning feedback to each group asap.
+
+2.The EDA projects should have an overall theme, i.e., how do you describe the goal of of your project in 1 or 2 sentences? 
+
+
+## Instruction for your Shiny app
+
+
+1. The app must have an well-organized interface
+2. For the visualization:
+
+@@ -39,7 +134,6 @@ For the report we will use weather data from [Open Metro](https://open-meteo.com
+
+Each group member should please turn in a `RMD` file for the shiny app and a `HTML` file of the compiled application. Also please include a seperate `RMD` file for the post production.
+
+
+## Grading structure
+
+The precise rubric will be published via ELMS. In addition to the criteria from the previous projects, you will be graded on the functionality of your Shiny app and the quality of your questions/report. 
+@@ -50,7 +144,6 @@ The precise rubric will be published via ELMS. In addition to the criteria from
+
+> **Caution:** Please let me know of communication issues as soon as possible. You are not expected to pick up substantial slacks from your group members. 
+
+
+| Role | Responsibilities |
+|------|----------------|
+| **Project Leader/Manager** | - Guides the overall direction of the EDA project <br> - Organizes workflow, deadlines, communication (with team members and the instructor), and file submission  |
+@@ -61,18 +154,10 @@ The precise rubric will be published via ELMS. In addition to the criteria from
+|||
+| **All Members** | - Each member is responsible for $\geq 1$ question/figure <br> - Each member is responsible for writing a group member review, to be submitted separately |
+
+
+
+
+## Post-production
+
+Each member is required to submit a report including an individual reflection and a group member evaluation. Both will be available only to the instructor/grader. Each report must include the following key information:
+
+- Your roles and your plots (1 paragraph)
+- Summary of your work (1 paragraph)
+- Evaluation of each of your team member's work, i.e., what aspects are done well and what could be improved for each member. (1 paragraph for each member)
+
+
+
+
+
+- Evaluation of each of your team member's work, i.e., what aspects are done well and what could be improved for each member. (1 paragraph for each member)
