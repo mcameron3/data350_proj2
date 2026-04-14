@@ -1,0 +1,297 @@
+---
+title: "EDA Project Part 2"
+author: "Data 350"
+date: "Due date: April 13 2026 at midnight (EST)"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Overview
+
+In this portion of the project, you will improve upon your previous EDA report to build an interactive dashboard using Shiny.
+For the report we will use weather data from [Open Metro](https://open-meteo.com/). Specifically the data can be scrapped from this url https://api.open-meteo.com/v1/forecast and the data is open-sourced so no api key is needed.
+
+
+
+## Preparation
+
+1. Study the feedback that your peers gave you to see if they make sense. If so, figure out how to incorporate it into the project. Note that each group member may have received comments from different peers, so gather them.  I will work on returning feedback to each group asap.
+
+2.The EDA projects should have an overall theme, i.e., how do you describe the goal of of your project in 1 or 2 sentences? 
+
+```{r}
+library(shiny)
+library(httr)
+library(jsonlite)
+library(ggplot2)
+library(dplyr)
+
+# Country coordinates
+COUNTRIES <- list(
+  "United States (New York)"  = c(40.71, -74.01),
+  "United Kingdom (London)"   = c(51.51,  -0.13),
+  "Japan (Tokyo)"             = c(35.69, 139.69),
+  "India (Mumbai)"            = c(19.08,  72.88),
+  "Brazil (São Paulo)"        = c(-23.55, -46.63),
+  "Australia (Sydney)"        = c(-33.87, 151.21),
+  "Germany (Berlin)"          = c(52.52,  13.40),
+  "France (Paris)"            = c(48.85,   2.35),
+  "China (Beijing)"           = c(39.91, 116.39),
+  "South Africa (Cape Town)"  = c(-33.92,  18.42)
+)
+
+# Precipitation variable options
+PRECIP_TYPES <- list(
+  "Total Precipitation (mm)"  = "precipitation_sum",
+  "Rainfall (mm)"             = "rain_sum",
+  "Snowfall (cm)"             = "snowfall_sum",
+  "Precipitation Hours (hrs)" = "precipitation_hours"
+)
+
+#fetches for individual years
+fetch_annual <- function(lat, lon, years, variable) {
+  results <- list()
+  for (yr in years) {
+    res <- tryCatch(
+      GET("https://archive-api.open-meteo.com/v1/archive",
+          query = list(
+            latitude   = lat,
+            longitude  = lon,
+            start_date = paste0(yr, "-01-01"),
+            end_date   = paste0(yr, "-12-31"),
+            daily      = variable,
+            timezone   = "auto"
+          )),
+      error = function(e) NULL
+    )
+    if (is.null(res) || status_code(res) != 200) next
+    data <- tryCatch(
+      fromJSON(content(res, as = "text", encoding = "UTF-8"), simplifyDataFrame = TRUE),
+      error = function(e) NULL
+    )
+    if (is.null(data$daily)) next
+    vals <- as.numeric(data$daily[[variable]])
+    results[[length(results) + 1]] <- data.frame(
+      year  = yr,
+      value = sum(vals, na.rm = TRUE)
+    )
+  }
+  if (length(results) == 0) return(NULL)
+  bind_rows(results)
+}
+
+sig_stars <- function(p) {
+  if (p < 0.001) "***"
+  else if (p < 0.01) "**"
+  else if (p < 0.05) "*"
+  else if (p < 0.1) "."
+  else "ns"
+}
+
+ui <- fluidPage(
+  
+  
+  fluidRow(column(12,h3("Precipitation By Country"),
+                  div(class="subtitle","Annual totals scraped every 5 years"))),
+  
+  fluidRow(column(3,
+           selectInput("country", "Country / City", choices = names(COUNTRIES),
+                           selected = "United States (New York)"),
+           selectInput("precip_type", "Precipitation Type", choices = names(PRECIP_TYPES),
+                           selected = "Total Precipitation (mm)"),
+           sliderInput("year_range", "Year Range", min=1950, max=2020, value=c(1980,2020), step=5, sep=""),
+           actionButton("fetch", "Fetch Data", class="btn-primary", width="100%"),
+           textOutput("status")
+           
+    ),
+    
+    #Plot and Significanec
+    column(9,plotOutput("scatter", height="400px"),uiOutput("sig_section")),
+  ),
+  
+  htmlOutput("analysis")
+)
+
+
+server <- function(input, output, session) {
+  
+  rv <- reactiveValues(df=NULL, msg="Press 'Fetch Data' to load data.")
+  
+  observeEvent(input$fetch, {
+    coords   <- COUNTRIES[[input$country]]
+    variable <- PRECIP_TYPES[[input$precip_type]]
+    years    <- seq(input$year_range[1], input$year_range[2], by=5)
+    
+    rv$df  <- NULL
+    rv$msg <- paste0("Fetching ", length(years), " data points…")
+    
+    df <- fetch_annual(coords[1], coords[2], years, variable)
+    
+    if (is.null(df) || nrow(df) == 0) {
+      rv$msg <- "No data returned. Try different settings."
+    } else {
+      rv$df  <- df
+      rv$msg <- paste0(nrow(df), " annual values loaded.")
+    }
+  })
+  
+  output$status <- renderText(rv$msg)
+  
+  #makes scatter plot
+  output$scatter <- renderPlot({
+    df <- rv$df
+    if (is.null(df)) {
+      ggplot() +
+        annotate("text", x=0.5, y=0.5,
+                 label="Select options and press\n'Fetch Data' to see the chart.",
+                 size=5, color="#9aa5b8", hjust=0.5) +
+        theme_void() + xlim(0,1) + ylim(0,1)
+    } else {
+      #actual plot
+      ggplot(df, aes(x=year, y=value)) +
+        geom_smooth(method="lm", se=TRUE,
+                    color="#f97316", fill="#fed7aa", linewidth=1, alpha=0.25) +
+        geom_point(color="#2563eb", size=4, alpha=0.9) +
+        scale_x_continuous(breaks=df$year) +
+        labs(
+          title = paste0(input$country, "  —  ", input$precip_type),
+          x = "Year",
+          y = input$precip_type
+        ) +
+        theme_minimal(base_size=13) +
+        #theme, keep shared 
+        theme(
+          plot.title       = element_text(face="bold", color="#1a2e4a", size=14),
+          axis.text.x      = element_text(angle=35, hjust=1, color="#6b7a90"),
+          axis.text.y      = element_text(color="#6b7a90"),
+          axis.title       = element_text(color="#4b5563"),
+          panel.grid.minor = element_blank(),
+          panel.grid.major = element_line(color="#eef0f5"),
+          plot.caption     = element_text(color="#9aa5b8", size=10),
+          plot.background  = element_rect(fill="white", color=NA)
+        )
+    }
+  })
+  
+  #Significance UI
+  output$sig_section <- renderUI({
+    df <- rv$df
+    if (is.null(df) || nrow(df) < 3) return(NULL)
+    
+    # Linear regression (trend over time)
+    fit   <- lm(value ~ year, data=df)
+    s     <- summary(fit)
+    coef_row <- s$coefficients["year", ]
+    slope    <- coef_row["Estimate"]
+    p_val    <- coef_row["Pr(>|t|)"]
+    r2       <- s$r.squared
+    n        <- nrow(df)
+    stars    <- sig_stars(p_val)
+    
+    #Spearman rank correlation
+    sp       <- cor.test(df$year, df$value, method="spearman", exact=FALSE)
+    sp_rho   <- sp$estimate
+    sp_p     <- sp$p.value
+    
+    # Verdict
+    if (n < 5) {
+      verdict_class <- "insuf"
+      verdict_text  <- "Too few data points for conclusion (need ≥ 5)."
+    } else if (p_val < 0.05) {
+      direction <- if (slope > 0) "increasing" else "decreasing"
+      verdict_class <- "sig"
+      verdict_text  <- paste0(
+        "Statistically significant ", direction, " trend detected (p < 0.05). ",
+        "Precipitation is changing at approximately ",
+        round(slope, 2), " ", gsub(".*\\(|\\)","", input$precip_type), " per year."
+      )
+    } else {
+      verdict_class <- "nonsig"
+      verdict_text  <- paste0(
+        "No statistically significant trend detected (p = ", round(p_val, 3), "). ",
+        "Observed variation is consistent with random changes."
+      )
+    }
+    
+    tags$div(style="margin-top:16px; font-size:13px; color:#374151; line-height:1.7;",
+             tags$strong("Significance Test — Linear Trend over Time"), tags$br(),
+             verdict_text, tags$br(), tags$br(),
+             paste0("OLS regression: slope = ", round(slope, 3),
+                    ", p = ", formatC(p_val, format="e", digits=2), " ", stars,
+                    ", R² = ", round(r2, 3), " (n = ", n, ")"), tags$br(),
+             paste0("Spearman rank correlation: ρ = ", round(sp_rho, 3),
+                    ", p = ", round(sp_p, 3)), tags$br(), tags$br(),
+             tags$span(style="color:#9aa5b8; font-size:11px;",
+                       "Significance codes: *** p<0.001  ** p<0.01  * p<0.05  . p<0.1  ns p≥0.1"
+             )
+    )
+    
+  })
+  output$analysis <- renderUI({
+    # Use HTML tags directly
+    HTML("<b>Analysis</b>: This is the analysis")
+    
+  })
+  
+}
+
+shinyApp(ui, server)
+```
+
+
+## Instruction for your Shiny app
+
+
+1. The app must have an well-organized interface
+2. For the visualization:
+
+    - Each question must have at least on interactive figure
+    - Each questiot must use a different plot type (okay if say quesiton is `geom_point() + geom_smooth()` and question is `geom_boxplot + geom_smooth()`)
+    - Each plot must include at least 4 variables
+    - Please incorporate statistics (correlation and standard error), regression models and histogram distributions into the project.
+
+## Submission
+
+Each group member should please turn in a `RMD` file for the shiny app and a `HTML` file of the compiled application. Also please include a seperate `RMD` file for the post production.
+
+
+## Grading structure
+
+The precise rubric will be published via ELMS. In addition to the criteria from the previous projects, you will be graded on the functionality of your Shiny app and the quality of your questions/report. 
+
+## Group Structure 
+
+> **Optional but recommended:** switching your role from the previous project for a more well-rounded experience.
+
+> **Caution:** Please let me know of communication issues as soon as possible. You are not expected to pick up substantial slacks from your group members. 
+
+
+| Role | Responsibilities |
+|------|----------------|
+| **Project Leader/Manager** | - Guides the overall direction of the EDA project <br> - Organizes workflow, deadlines, communication (with team members and the instructor), and file submission  |
+|||
+| **Data/Stat Lead** | - Performs data cleaning, transformations, and statistical analysis <br>- Provides technical support to others |
+|||
+| **Visualization/Communication Lead** | - Designs clear, well-labeled, and statistically informed figures <br>- Standardizes figures/texts and integrate them into report<br>|
+|||
+| **All Members** | - Each member is responsible for $\geq 1$ question/figure <br> - Each member is responsible for writing a group member review, to be submitted separately |
+
+
+
+
+## Post-production
+
+Each member is required to submit a report including an individual reflection and a group member evaluation. Both will be available only to the instructor/grader. Each report must include the following key information:
+
+- Your roles and your plots (1 paragraph)
+- Summary of your work (1 paragraph)
+- Evaluation of each of your team member's work, i.e., what aspects are done well and what could be improved for each member. (1 paragraph for each member)
+
+
+
+
+
