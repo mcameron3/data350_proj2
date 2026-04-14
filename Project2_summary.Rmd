@@ -310,7 +310,22 @@ ui <- fluidPage(
       tabsetPanel(
         id = "tabs",
 
-        tabPanel("Temperature Timeline", br(), plotOutput("temp_plot")),
+        tabPanel(
+          "Temperature Timeline", 
+          br(), 
+          plotOutput("temp_plot"),
+          br(), br(), br(), br(), br(), br(), br(), br(), br(), br(),
+          br(), br(), br(), br(), br(), br(), br(), br(), br(), br(),
+          br(), br(), br(), br(), br(), br(), br(), br(), br(), br(),
+          br(), br(), br(), br(), br(), br(), br(), br(), br(), br(),
+          br(), br(), br(), br(), br(), br(), br(), br(), br(), br(),
+          br(), br(), br(), 
+          div(style = "font-size:13px;color:#5f5e5a;",
+            "This graph displays the approximate start of each season through calculating the average temperature of every day since 1940, and determining when a season has started using temperature thresholds that the user can change. The graph is faceted by year, to show each year's data concurrently. Within each year, there is a line graph to show daily average temperature throughout the year, as well as color-coding to show which season that day belongs in. There are also dotted lines passing through the graph to show when the meteorological start dates for each season are.",
+            "The question I wanted to explore with this graph is whether or not the duration or arrival of seasons has been affected by climate change. My hypothesis is that due to climate change, we may see seasons like spring arrive earlier, or summar last longer. However, simply through taking a look at this data, it does not appear like there is any particular trend with season arrival time or season duration changing since 1940.",
+            "Potential explanations behind this are natural variations behind weather affecting season start and end time - there are many factors that can affect temperature, such as cold fronts, warm fronts, or storms, and all of these confounding factors can make it extremely difficult to establish what exactly a baseline for when the seasons start is. Additionally, there may also be issues related to our data itself - since our data only spans back until 1940, there may not be sufficient data to show the long-term effects of climate change."
+          )
+        ),
 
         tabPanel(
           "Arrival Trends",
@@ -318,8 +333,9 @@ ui <- fluidPage(
           plotOutput("deviation_trend_plot", height = "420px"),
           br(),
           div(style = "font-size:13px;color:#5f5e5a;",
-            "Each point represents how many days early (negative) or late (positive) a season arrived compared to its meteorological standard start (Mar 1 for spring, Jun 1 for sumer, Sep 1 for fall, Dec 1 for winter).",
-            "The smooth band shows the long-run trend."
+            "This graph displays how many days early (negative) or late (positive) a season arrived compared to its meteorological standard start (Mar 1 for spring, Jun 1 for sumer, Sep 1 for fall, Dec 1 for winter). It also includes the long-run trend. This visualization uses the same data as the Temperature Timeline tab, but displays it in a different manner - here, the focus is deviation from the standard start date.", 
+            "The question I wanted to explore with this graph is whether or not we see a trend with seasons starting earlier or later. My hypothesis is that due to climate change, we might expect to see seasons like spring or summer start earlier, as temperatures would surpass the temperature thresholds we define for spring or summer at an earlier date. However, simply through taking a look at this data, it does not appear like there is any particular trend with season arrival dates varying since 1940.",
+            "Similarly to the previous graph, potential explanations behind this are natural variations behind weather affecting season start dates - these confounders are almost impossible to control for, and with just this dataset, we have no information on various phenomena that may have affected the data, like cold fronts or warm fronts. Additionally, the issue of simply not having enough data is also applicable here - we may not see any trends because our data may not extend far back enough."
           )
         ),
 
@@ -331,6 +347,9 @@ ui <- fluidPage(
           div(style = "font-size:13px;color:#5f5e5a;",
             "Line shows the length of each season's primary run per year.",
             "Dashed line = long-run average duration for that season."
+            "This graph displays how many long a season lasted compared (represented through the points and the solid line) to the long-run average (represented as the dashed line). This visualization uses the same data as the previous tabs, but displays it in a different manner - here, the focus is season duration.", 
+            "The question I wanted to explore with this graph is whether or not we see a trend with seasons lating longer or shorter. My hypothesis is that due to climate change, we might expect to see seasons like summer last longer or winter last shorter, as temperatures would surpass the temperature thresholds we define for winter or summer at an earlier date and for longer. However, simply through taking a look at this data, it does not appear like there is any particular trend with season duration varying since 1940.",
+            "Once again, similarly to the previous graphs, a reason behing this could be confounding variables that we cannot control for. Since weather is so unpredictable, there are other factors that could be affecting temperatures in ways that make climate change seem more subtle based on the visualizations I've created here. Additionally, the issue of data also stands, since our dataset only ranges to 1940, which may not be sufficient to show the whole scope of climate change."
           )
         )
       )
@@ -424,7 +443,7 @@ server <- function(input, output, session) {
       facet_wrap(~ year, ncol = 1, strip.position = "left") +
       scale_x_continuous(breaks = month_breaks, labels = month_labels, expand = c(0, 0)) +
       scale_y_continuous(breaks = c(20, 50, 80)) +
-      labs(x = "Month", y = "Year", title = "Daily Average Temperatures by Year (1940-2026)") +
+      labs(x = "Month", y = "Year & Temperature (F)", title = "Daily Average Temperatures by Year (1940-2026)") +
       theme_app() +
       theme(
         legend.position = "bottom",
