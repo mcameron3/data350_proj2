@@ -345,8 +345,6 @@ ui <- fluidPage(
           plotOutput("duration_trend_plot", height = "420px"),
           br(),
           div(style = "font-size:13px;color:#5f5e5a;",
-            "Line shows the length of each season's primary run per year.",
-            "Dashed line = long-run average duration for that season."
             "This graph displays how many long a season lasted compared (represented through the points and the solid line) to the long-run average (represented as the dashed line). This visualization uses the same data as the previous tabs, but displays it in a different manner - here, the focus is season duration.", 
             "The question I wanted to explore with this graph is whether or not we see a trend with seasons lating longer or shorter. My hypothesis is that due to climate change, we might expect to see seasons like summer last longer or winter last shorter, as temperatures would surpass the temperature thresholds we define for winter or summer at an earlier date and for longer. However, simply through taking a look at this data, it does not appear like there is any particular trend with season duration varying since 1940.",
             "Once again, similarly to the previous graphs, a reason behing this could be confounding variables that we cannot control for. Since weather is so unpredictable, there are other factors that could be affecting temperatures in ways that make climate change seem more subtle based on the visualizations I've created here. Additionally, the issue of data also stands, since our dataset only ranges to 1940, which may not be sufficient to show the whole scope of climate change."

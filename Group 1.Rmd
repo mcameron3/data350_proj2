@@ -1,0 +1,735 @@
+---
+title: "EDA Project Part 2"
+author: "Data 350"
+date: "Due date: April 13 2026 at midnight (EST)"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r}
+library(shiny)
+library(httr)
+library(jsonlite)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(scales)
+library(zoo)
+```
+
+```{r}
+# dc coordinates 
+DC <- list(latitude = 38.9072, longitude = -77.0369)
+
+# seasons (valentina)
+FIRST_YEAR <- 1940L
+LAST_YEAR <- 2026L
+STD_MD <- c(Spring = "03-01", Summer = "06-01", Autumn = "09-01", Winter = "12-01")
+season_colors <- c(Spring = "#5DB88A", Summer = "#E8924A", Autumn = "#C06030", Winter = "#5B8DC4")
+
+# countries (ian) 
+COUNTRIES <- list(
+  "United States (New York)" = c(40.71, -74.01),
+  "United Kingdom (London)" = c(51.51, -0.13),
+  "Japan (Tokyo)" = c(35.69, 139.69),
+  "India (Mumbai)" = c(19.08, 72.88),
+  "Brazil (São Paulo)" = c(-23.55, -46.63),
+  "Australia (Sydney)" = c(-33.87, 151.21),
+  "Germany (Berlin)" = c(52.52, 13.40),
+  "France (Paris)" = c(48.85, 2.35),
+  "China (Beijing)" = c(39.91, 116.39),
+  "South Africa (Cape Town)" = c(-33.92, 18.42)
+)
+
+PRECIP_TYPES <- list(
+  "Total Precipitation (mm)" = "precipitation_sum",
+  "Rainfall (mm)" = "rain_sum",
+  "Snowfall (cm)" = "snowfall_sum",
+  "Precipitation Hours (hrs)" = "precipitation_hours"
+)
+```
+
+```{r}
+# valentina's helpers
+fetch_archive_slice <- function(start_date, end_date) {
+  resp <- GET(
+    url = "https://archive-api.open-meteo.com/v1/archive",
+    query = list(
+      latitude = DC$latitude,
+      longitude = DC$longitude,
+      start_date = format(start_date, "%Y-%m-%d"),
+      end_date = format(end_date, "%Y-%m-%d"),
+      daily = paste("temperature_2m_max", "temperature_2m_min", "precipitation_sum", sep = ","),
+      temperature_unit = "fahrenheit",
+      precipitation_unit = "inch",
+      timezone = "America/New_York"
+    )
+  )
+  stop_for_status(resp)
+  raw <- fromJSON(content(resp, as = "text", encoding = "UTF-8"), simplifyVector = TRUE)
+  df <- as.data.frame(raw$daily)
+  names(df) <- c("date", "max_temp", "min_temp", "precip_sum")
+  df$date <- as.Date(df$date)
+  df$avg_temp <- (df$max_temp + df$min_temp) / 2
+  df
+}
+
+fetch_historical_valentina <- function(progress = NULL) {
+  chunk_size <- 10L
+  starts <- seq(FIRST_YEAR, LAST_YEAR, by = chunk_size)
+  n <- length(starts)
+  chunks <- vector("list", n)
+  for (i in seq_along(starts)) {
+    y0 <- starts[i]
+    y1 <- min(y0 + chunk_size - 1L, LAST_YEAR)
+    sd <- as.Date(paste0(y0, "-01-01"))
+    ed <- min(as.Date(paste0(y1, "-12-31")), Sys.Date() - 1)
+    if (!is.null(progress))
+      progress$set(value = (i - 1) / n, message = paste0("Fetching seasons ", y0, "\u2013", y1, "\u2026"))
+    chunks[[i]] <- tryCatch(
+      fetch_archive_slice(sd, ed),
+      error = function(e) { warning(conditionMessage(e)); NULL }
+    )
+  }
+  bind_rows(Filter(Negate(is.null), chunks))
+}
+
+classify_seasons <- function(df, window = 7, summer_thresh = 65, winter_thresh = 41) {
+  df <- df |> arrange(date)
+  df$roll_avg <- as.numeric(stats::filter(df$avg_temp, rep(1 / window, window), sides = 1))
+  df <- df[!is.na(df$roll_avg), ]
+  df$thermal <- dplyr::case_when(
+    df$roll_avg >= summer_thresh ~ "Summer",
+    df$roll_avg <  winter_thresh ~ "Winter",
+    TRUE                         ~ "Transition"
+  )
+  df$year <- lubridate::year(df$date)
+  df <- df |>
+    group_by(year) |>
+    group_modify(function(yr, key) {
+      peak_idx <- which.max(yr$roll_avg)
+      yr$season <- yr$thermal
+      yr$season[seq_len(peak_idx)][yr$thermal[seq_len(peak_idx)] == "Transition"] <- "Spring"
+      if (peak_idx < nrow(yr)) {
+        tail_idx <- seq(peak_idx + 1L, nrow(yr))
+        yr$season[tail_idx][yr$thermal[tail_idx] == "Transition"] <- "Autumn"
+      }
+      yr
+    }) |>
+    ungroup()
+  df
+}
+
+season_runs <- function(df) {
+  df |>
+    arrange(date) |>
+    mutate(grp = cumsum(season != lag(season, default = ""))) |>
+    group_by(grp, season) |>
+    summarise(
+      year = first(lubridate::year(date)),
+      start = min(date),
+      end = max(date),
+      duration = as.integer(end - start) + 1L,
+      mean_temp = round(mean(avg_temp, na.rm = TRUE), 1),
+      .groups = "drop"
+    ) |>
+    arrange(start)
+}
+
+yearly_season_stats <- function(runs_df) {
+  runs_df |>
+    group_by(year, season) |>
+    slice_min(start, n = 1, with_ties = FALSE) |>
+    ungroup() |>
+    mutate(
+      std_md = STD_MD[season],
+      std_date = as.Date(paste0(year, "-", std_md)),
+      deviation = as.integer(start - std_date)
+    ) |>
+    select(year, season, start, end, duration, mean_temp, std_date, deviation)
+}
+
+theme_app <- function(base_size = 13) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(color = "#e0ddd4"),
+      plot.background = element_rect(fill = "#fff", color = NA),
+      panel.background = element_rect(fill = "#fff", color = NA),
+      plot.subtitle = element_text(color = "#888780", size = 11),
+      plot.caption = element_text(color = "#888780", size = 10)
+    )
+}
+```
+
+```{r}
+# ian helpers 
+fetch_annual_precip <- function(lat, lon, years, variable) {
+  results <- list()
+  for (yr in years) {
+    res <- tryCatch(
+      GET("https://archive-api.open-meteo.com/v1/archive",
+          query = list(
+            latitude = lat,
+            longitude = lon,
+            start_date = paste0(yr, "-01-01"),
+            end_date = paste0(yr, "-12-31"),
+            daily = variable,
+            timezone = "auto"
+          )),
+      error = function(e) NULL
+    )
+    if (is.null(res) || status_code(res) != 200) next
+    data <- tryCatch(
+      fromJSON(content(res, as = "text", encoding = "UTF-8"), simplifyDataFrame = TRUE),
+      error = function(e) NULL
+    )
+    if (is.null(data$daily)) next
+    vals <- as.numeric(data$daily[[variable]])
+    results[[length(results) + 1]] <- data.frame(year = yr, value = sum(vals, na.rm = TRUE))
+  }
+  if (length(results) == 0) return(NULL)
+  bind_rows(results)
+}
+
+sig_stars <- function(p) {
+  if (p < 0.001) "***" else if (p < 0.01) "**" else if (p < 0.05) "*"
+  else if (p < 0.1) "." else "ns"
+}
+```
+
+```{r}
+# michelle helpers
+fetch_year_michelle <- function(year) {
+  resp <- GET(
+    "https://archive-api.open-meteo.com/v1/archive",
+    query = list(
+      latitude = DC$latitude,
+      longitude = DC$longitude,
+      start_date = paste0(year, "-01-01"),
+      end_date = paste0(year, "-12-31"),
+      daily = paste("temperature_2m_max", "temperature_2m_min", "precipitation_sum", sep = ","),
+      hourly = paste("temperature_2m", "precipitation", sep = ","),
+      temperature_unit = "fahrenheit",
+      precipitation_unit = "inch",
+      timezone = "America/New_York"
+    )
+  )
+  stop_for_status(resp)
+  d <- fromJSON(content(resp, as = "text", encoding = "UTF-8"), simplifyVector = TRUE)
+
+  daily <- as.data.frame(d$daily);  names(daily)  <- c("date", "max_temp", "min_temp", "precip_sum_in")
+  hourly <- as.data.frame(d$hourly); names(hourly) <- c("time", "temp_2m", "precip_in")
+  list(daily = daily, hourly = hourly)
+}
+
+prep_michelle <- function(all_daily, all_hourly) {
+  daily_df <- bind_rows(all_daily)
+  daily_df$date <- as.Date(daily_df$date)
+  daily_df$range_f <- daily_df$max_temp - daily_df$min_temp
+  daily_df$month <- month(daily_df$date, label = TRUE, abbr = TRUE)
+  daily_df$month_num <- month(daily_df$date)
+  daily_df$year <- year(daily_df$date)
+
+  hourly_df <- bind_rows(all_hourly)
+  hourly_df$time <- as.POSIXct(hourly_df$time, format = "%Y-%m-%dT%H:%M", tz = "America/New_York")
+  hourly_df$hour <- as.integer(hour(hourly_df$time))
+  hourly_df$date <- as.Date(hourly_df$time, tz = "America/New_York")
+  hourly_df$year <- year(hourly_df$date)
+  hourly_df$month <- month(hourly_df$date, label = TRUE, abbr = TRUE)
+  hourly_df$month_num <- month(hourly_df$date)
+
+  annual_summary <- daily_df |>
+    group_by(year) |>
+    summarise(
+      avg_range = mean(range_f, na.rm = TRUE),
+      sd_range = sd(range_f, na.rm = TRUE),
+      extreme_days = sum(range_f > 30, na.rm = TRUE),
+      avg_max = mean(max_temp, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  list(daily = daily_df, hourly = hourly_df, annual = annual_summary)
+}
+```
+
+```{r}
+# shiny app
+
+ui <- fluidPage(
+  tags$head(tags$style(HTML("
+    body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; background: #f8f7f4; color: #2c2c2a; }
+    .well { background: #fff; border: 1px solid #e0ddd4; border-radius: 10px; box-shadow: none; }
+    .nav-tabs { border-bottom: 2px solid #e0ddd4; }
+    .nav-tabs > li.active > a { font-weight: 600; color: #2c2c2a; }
+    .section-label { font-size: 11px; color: #888780; text-transform: uppercase; letter-spacing: .06em; margin: 14px 0 4px; }
+    .guiding-q { background: #1a2e4a; color: #fff; padding: 18px 28px; border-radius: 10px; margin-bottom: 20px; }
+    .guiding-q h3 { margin: 0; font-size: 20px; font-weight: 500; }
+    .guiding-q p { margin: 6px 0 0; font-size: 13px; color: #a0b0c8; }
+  "))),
+
+  # guiding question
+  div(class = "guiding-q", h3("What are indications of climate change from historical weather data?")),
+
+  # tabs
+  tabsetPanel(
+    id = "main_tabs",
+
+    # valentina 
+    tabPanel(
+      "Season Timing & Duration",
+
+      br(),
+      sidebarLayout(
+        sidebarPanel(
+          width = 3,
+          div(class = "section-label", "Question"),
+          p("Has season start time or season duration changed because of climate change?", style = "font-size:12px; color:#6b7a90;"),
+          hr(),
+          div(class = "section-label", "Data"),
+          textOutput("v_last_updated"),
+          br(),
+          p("Warning: The data loads slowly!"),
+          actionButton("v_load", "\u21bb  Refresh Data", style = "width:100%; border-radius:8px;"),
+          hr(),
+          div(class = "section-label", "Season Thresholds"),
+          sliderInput("v_summer", "Summer Threshold (\u00b0F)", min = 55, max = 80, value = 65, step = 1),
+          sliderInput("v_winter", "Winter Threshold (\u00b0F)", min = 28, max = 50, value = 41, step = 1),
+        ),
+
+        mainPanel(
+          width = 9,
+          tabsetPanel(
+            tabPanel(
+              "Temperature Timeline",
+              br(),
+              plotOutput("v_temp_plot"),
+              br(), br(), br(), br(), br(), br(), br(), br(), br(), br(),
+              br(), br(), br(), br(), br(), br(), br(), br(), br(), br(),
+              br(), br(), br(), br(), br(), br(), br(), br(), br(), br(),
+              br(), br(), br(), br(), br(), br(), br(), br(), br(), br(),
+              br(), br(), br(), br(), br(), br(), br(), br(), br(), br(),
+              br(), br(), br(), 
+              div(style = "font-size:13px;color:#5f5e5a;",
+                "This graph displays the approximate start of each season through calculating the average temperature of every day since 1940, and determining when a season has started using temperature thresholds that the user can change. The graph is faceted by year, to show each year's data concurrently. Within each year, there is a line graph to show daily average temperature throughout the year, as well as color-coding to show which season that day belongs in. There are also dotted lines passing through the graph to show when the meteorological start dates for each season are.",
+            "The question I wanted to explore with this graph is whether or not the duration or arrival of seasons has been affected by climate change. My hypothesis is that due to climate change, we may see seasons like spring arrive earlier, or summar last longer. However, simply through taking a look at this data, it does not appear like there is any particular trend with season arrival time or season duration changing since 1940.",
+            "Potential explanations behind this are natural variations behind weather affecting season start and end time - there are many factors that can affect temperature, such as cold fronts, warm fronts, or storms, and all of these confounding factors can make it extremely difficult to establish what exactly a baseline for when the seasons start is. Additionally, there may also be issues related to our data itself - since our data only spans back until 1940, there may not be sufficient data to show the long-term effects of climate change."
+              )
+            ),
+            tabPanel(
+              "Arrival Trends",
+              br(),
+              plotOutput("v_deviation_plot", height = "420px"),
+              br(),
+              div(style = "font-size:13px;color:#5f5e5a;",
+                "This graph displays how many days early (negative) or late (positive) a season arrived compared to its meteorological standard start (Mar 1 for spring, Jun 1 for sumer, Sep 1 for fall, Dec 1 for winter). It also includes the long-run trend. This visualization uses the same data as the Temperature Timeline tab, but displays it in a different manner - here, the focus is deviation from the standard start date.", 
+            "The question I wanted to explore with this graph is whether or not we see a trend with seasons starting earlier or later. My hypothesis is that due to climate change, we might expect to see seasons like spring or summer start earlier, as temperatures would surpass the temperature thresholds we define for spring or summer at an earlier date. However, simply through taking a look at this data, it does not appear like there is any particular trend with season arrival dates varying since 1940.",
+            "Similarly to the previous graph, potential explanations behind this are natural variations behind weather affecting season start dates - these confounders are almost impossible to control for, and with just this dataset, we have no information on various phenomena that may have affected the data, like cold fronts or warm fronts. Additionally, the issue of simply not having enough data is also applicable here - we may not see any trends because our data may not extend far back enough."
+              )
+            ),
+            tabPanel(
+              "Duration Trends",
+              br(),
+              plotOutput("v_duration_plot", height = "420px"),
+              br(),
+              div(style = "font-size:13px;color:#5f5e5a;",
+                "This graph displays how many long a season lasted compared (represented through the points and the solid line) to the long-run average (represented as the dashed line). This visualization uses the same data as the previous tabs, but displays it in a different manner - here, the focus is season duration.", 
+            "The question I wanted to explore with this graph is whether or not we see a trend with seasons lating longer or shorter. My hypothesis is that due to climate change, we might expect to see seasons like summer last longer or winter last shorter, as temperatures would surpass the temperature thresholds we define for winter or summer at an earlier date and for longer. However, simply through taking a look at this data, it does not appear like there is any particular trend with season duration varying since 1940.",
+            "Once again, similarly to the previous graphs, a reason behing this could be confounding variables that we cannot control for. Since weather is so unpredictable, there are other factors that could be affecting temperatures in ways that make climate change seem more subtle based on the visualizations I've created here. Additionally, the issue of data also stands, since our dataset only ranges to 1940, which may not be sufficient to show the whole scope of climate change."
+              )
+            )
+          )
+        )
+      )
+    ),
+
+    # ian 
+    tabPanel(
+      "Global Precipitation Trends",
+
+      br(),
+      sidebarLayout(
+        sidebarPanel(
+          width = 3,
+          div(class = "section-label", "Question"),
+          p("Has climate change affected precipitation levels or precipitation type?", style = "font-size:12px; color:#6b7a90;"),
+          hr(),
+          div(class = "section-label", "Variables"),
+          selectInput("i_country", "Country & City",
+                      choices  = names(COUNTRIES),
+                      selected = "United States (New York)"),
+          selectInput("i_precip", "Precipitation Type",
+                      choices  = names(PRECIP_TYPES),
+                      selected = "Total Precipitation (mm)"),
+          sliderInput("i_years", "Years (Increments of 5)",
+                      min = 1950, max = 2020,
+                      value = c(1980, 2020), step = 5, sep = ""),
+          br(),
+          actionButton("i_fetch", "Scrape Data",
+                       class = "btn-primary", style = "width:100%;"),
+          br(), br(),
+          textOutput("i_status")
+        ),
+
+        mainPanel(
+          width = 9,
+          plotOutput("i_scatter", height = "400px"),
+          br(),
+          uiOutput("i_sig"),
+          br(),
+          uiOutput("i_analysis")
+        )
+      )
+    ),
+
+    # michelle 
+    tabPanel(
+      "Temperature Trends",
+
+      br(),
+      sidebarLayout(
+        sidebarPanel(
+          width = 3,
+          div(class = "section-label", "Question"),
+          p("Have temperatures in DC changed significantly because of climate change?", style = "font-size:12px; color:#6b7a90;"),
+          hr(),
+          div(class = "section-label", "Variables"),
+          sliderInput("m_years", "Year", min = 1950, max = 2024, value = c(1950, 2024), step = 5, sep = ""),
+          sliderInput("m_months", "Month", min = 1, max = 12, value = c(1, 12), step = 1, sep = ""),
+          br(),
+          actionButton("m_load", "Scrape Data", class = "btn-primary", style = "width:100%;"),
+          br(), br(),
+          textOutput("m_status"),
+        ),
+
+        mainPanel(
+          width = 9,
+          tabsetPanel(
+            tabPanel(
+              "Monthly Spread",
+              br(),
+              plotOutput("m_box", height = "420px"),
+              br(),
+              div(style = "font-size:13px;color:#5f5e5a;",
+                "ANALYSIS HERE."
+              )
+            ),
+            tabPanel(
+              "IQR Comparison",
+              br(),
+              plotOutput("m_iqr", height = "420px"),
+              br(),
+              uiOutput("m_stats"),
+              br(),
+              div(style = "font-size:13px;color:#5f5e5a;",
+                "ANALYSIS HERE."
+              )
+            )
+          )
+        )
+      )
+    )
+  )
+)
+
+# server 
+server <- function(input, output, session) {
+  
+  v_hist  <- reactiveVal(NULL)
+  v_fetch_time <- reactiveVal(NULL)
+
+  do_v_load <- function() {
+    prog <- shiny::Progress$new(session, min = 0, max = 1)
+    on.exit(prog$close())
+    prog$set(message = "Connecting to Open-Meteo archive\u2026", value = 0)
+    tryCatch({
+      v_hist(fetch_historical_valentina(progress = prog))
+      v_fetch_time(Sys.time())
+      prog$set(value = 1, message = "Done.")
+    }, error = function(e) {
+      showNotification(paste("Error:", conditionMessage(e)), type = "error", duration = 10)
+    })
+  }
+
+  observe({ do_v_load() }) |> bindEvent(TRUE, once = TRUE, ignoreInit = FALSE)
+  observeEvent(input$v_load, { do_v_load() })
+
+  output$v_last_updated <- renderText({
+    req(v_fetch_time())
+    paste("Updated:", format(v_fetch_time(), "%H:%M:%S"))
+  })
+
+  v_classified <- reactive({
+    req(v_hist())
+    classify_seasons(v_hist(), window = 7, summer_thresh = input$v_summer, winter_thresh = input$v_winter)
+  })
+  v_runs <- reactive({ req(v_classified()); season_runs(v_classified()) })
+  v_yrstats <- reactive({ req(v_runs()); yearly_season_stats(v_runs()) })
+
+  output$v_temp_plot <- renderPlot({
+    req(v_classified())
+    df <- v_classified()
+    df$doy <- as.integer(format(df$date, "%j"))
+
+    band_df <- df |>
+      group_by(year, doy) |>
+      summarise(season = season[1], .groups = "drop") |>
+      arrange(year, doy) |>
+      group_by(year) |>
+      mutate(grp = cumsum(season != lag(season, default = ""))) |>
+      group_by(year, grp, season) |>
+      summarise(xmin = min(doy) - .5, xmax = max(doy) + .5, .groups = "drop")
+
+    std_doy <- data.frame(
+      season = names(STD_MD),
+      doy = as.integer(format(as.Date(paste0("2001-", STD_MD)), "%j"))
+    )
+    month_breaks <- as.integer(format(as.Date(paste0("2001-", sprintf("%02d", 1:12), "-01")), "%j"))
+    month_labels <- c("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec")
+
+    ggplot(df, aes(x = doy, y = avg_temp)) +
+      geom_rect(data = band_df, aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = season), inherit.aes = FALSE, alpha = 0.18) +
+      scale_fill_manual(values = season_colors, name = NULL) +
+      geom_line(color = "#2c2c2a", linewidth = 0.4) +
+      geom_vline(data = std_doy, aes(xintercept = doy), color = "#888780", linetype = "dashed", linewidth = 0.4) +
+      facet_wrap(~ year, ncol = 1, strip.position = "left") +
+      scale_x_continuous(breaks = month_breaks, labels = month_labels, expand = c(0,0)) +
+      scale_y_continuous(breaks = c(20, 50, 80)) +
+      labs(x = "Month", y = "Year & Temperature (°F)", title = "Daily Average Temperatures by Year (1940–2026)") +
+      theme_app() +
+      theme(
+        legend.position = "bottom",
+        strip.text.y.left = element_text(size = 7, angle = 0, hjust = 1, margin = margin(r = 4)),
+        panel.spacing.y = unit(1, "pt"),
+        axis.text.y = element_text(size = 6),
+        axis.text.x = element_text(size = 8),
+        panel.grid.major = element_blank()
+      )
+  }, height = function() 18 * length(unique(v_classified()$year)))
+
+  output$v_deviation_plot <- renderPlot({
+    req(v_yrstats())
+    df <- v_yrstats()[!is.na(v_yrstats()$deviation), ]
+    ggplot(df, aes(x = year, y = deviation, color = season)) +
+      geom_hline(yintercept = 0, color = "#b4b2a9", linewidth = .5, linetype = "dashed") +
+      geom_point(alpha = 0.55, size = 1.8) +
+      geom_smooth(method = "loess", span = 0.35, se = TRUE, linewidth = 1, alpha = 0.15) +
+      facet_wrap(~ season, ncol = 2, scales = "free_y") +
+      scale_color_manual(values = season_colors, guide = "none") +
+      scale_x_continuous(breaks = pretty_breaks(6)) +
+      labs(x = "Year", y = "Deviation from Standard Start (Days)", title = "Season Arrival Since 1940") +
+      theme_app() +
+      theme(strip.text = element_text(face = "bold", size = 12), panel.spacing = unit(1.2, "lines"))
+  })
+
+  output$v_duration_plot <- renderPlot({
+    req(v_yrstats())
+    df <- v_yrstats()[!is.na(v_yrstats()$duration), ]
+    avg_dur <- df |> group_by(season) |>
+      summarise(mean_dur = mean(duration, na.rm = TRUE), .groups = "drop")
+    ggplot(df, aes(x = year, y = duration, color = season)) +
+      geom_line(alpha = 0.45, linewidth = 0.6) +
+      geom_point(alpha = 0.55, size = 1.4) +
+      geom_smooth(method = "loess", span = 0.35, se = TRUE, linewidth = 1, alpha = 0.12) +
+      geom_hline(data = avg_dur, aes(yintercept = mean_dur, color = season), linetype = "dashed", linewidth = 0.6, alpha = 0.7) +
+      facet_wrap(~ season, ncol = 2, scales = "free_y") +
+      scale_color_manual(values = season_colors, guide = "none") +
+      scale_x_continuous(breaks = pretty_breaks(6)) +
+      labs(x = "Year", y = "Duration (Days)", title = "Season Duration Since 1940") +
+      theme_app() +
+      theme(strip.text = element_text(face = "bold", size = 12), panel.spacing = unit(1.2, "lines"))
+  })
+
+  i_rv <- reactiveValues(df = NULL, msg = "Press 'Scrape Data' to load data.")
+
+  observeEvent(input$i_fetch, {
+    coords <- COUNTRIES[[input$i_country]]
+    variable <- PRECIP_TYPES[[input$i_precip]]
+    years <- seq(input$i_years[1], input$i_years[2], by = 5)
+    i_rv$df <- NULL
+    i_rv$msg <- paste0("Fetching ", length(years), " data points\u2026")
+    df <- fetch_annual_precip(coords[1], coords[2], years, variable)
+    if (is.null(df) || nrow(df) == 0) {
+      i_rv$msg <- "No data returned."
+    } else {
+      i_rv$df <- df
+      i_rv$msg <- paste0(nrow(df), " annual values loaded.")
+    }
+  })
+
+  output$i_status <- renderText(i_rv$msg)
+
+  output$i_scatter <- renderPlot({
+    df <- i_rv$df
+    if (is.null(df)) {
+      ggplot() +
+        annotate("text", x = .5, y = .5, label = "Select options and press\n'Scrape Data' to see the chart.", size = 5, color = "#9aa5b8", hjust = .5) +
+        theme_void() + xlim(0,1) + ylim(0,1)
+    } else {
+      ggplot(df, aes(x = year, y = value)) +
+        geom_smooth(method = "lm", se = TRUE, color = "#f97316", fill = "#fed7aa", linewidth = 1, alpha = 0.25) +
+        geom_point(color = "#2563eb", size = 4, alpha = 0.9) +
+        scale_x_continuous(breaks = df$year) +
+        labs(title  = paste0(input$i_precip, " in ", input$i_country), x = "Year", y = input$i_precip) +
+        theme_minimal(base_size = 13) +
+        theme(
+          plot.title = element_text(face = "bold", color = "#1a2e4a", size = 14),
+          axis.text.x = element_text(angle = 35, hjust = 1, color = "#6b7a90"),
+          axis.text.y = element_text(color = "#6b7a90"),
+          axis.title = element_text(color = "#4b5563"),
+          panel.grid.minor = element_blank(),
+          panel.grid.major = element_line(color = "#eef0f5"),
+          plot.background = element_rect(fill = "white", color = NA)
+        )
+    }
+  })
+
+  output$i_sig <- renderUI({
+    df <- i_rv$df
+    if (is.null(df) || nrow(df) < 3) return(NULL)
+    fit <- lm(value ~ year, data = df)
+    s <- summary(fit)
+    coef_row <- s$coefficients["year", ]
+    slope <- coef_row["Estimate"]
+    p_val <- coef_row["Pr(>|t|)"]
+    r2 <- s$r.squared
+    n <- nrow(df)
+    stars <- sig_stars(p_val)
+    sp <- cor.test(df$year, df$value, method = "spearman", exact = FALSE)
+
+    if (n < 5) {
+      verdict <- "Too few data points for a conclusion (need \u2265 5)."
+    } else if (p_val < 0.05) {
+      direction <- if (slope > 0) "increasing" else "decreasing"
+      verdict <- paste0("Statistically significant ", direction, " trend detected (p < 0.05). Precipitation is changing at ~", round(slope, 2), " ", gsub(".*\\(|\\)", "", input$i_precip), " per year.")
+    } else {
+      verdict <- paste0("No statistically significant trend detected (p = ", round(p_val, 3), "). Observed variation is consistent with chance.")
+    }
+
+    tags$div(style = "font-size:13px; color:#374151; line-height:1.8; margin-top:12px;",
+      tags$strong("Significance Test: Linear Trend Over Time"), tags$br(),
+      verdict, tags$br(), tags$br(),
+      paste0("OLS regression: slope = ", round(slope, 3), ", p = ", formatC(p_val, format = "e", digits = 2), " ", stars, ", R\u00b2 = ", round(r2, 3), " (n = ", n, ")"), tags$br(),
+      paste0("Spearman: \u03c1 = ", round(sp$estimate, 3), ", p = ", round(sp$p.value, 3))
+    )
+  })
+
+  output$i_analysis <- renderUI({
+    HTML("<p style='font-size:13px;color:#5f5e5a;'>
+      ANALYSIS HERE
+    </p>")
+  })
+
+  m_data  <- reactiveValues(daily = NULL, annual = NULL, msg = "Press 'Scrape Data' to load data.")
+
+  observeEvent(input$m_load, {
+    m_data$daily <- NULL
+    m_data$annual <- NULL
+    m_data$msg <- "Loading data\u2026"
+    years <- seq(input$m_years[1], input$m_years[2], by = 5)
+    all_d <- list(); all_h <- list()
+    withProgress(message = "Fetching data\u2026", value = 0, {
+      n <- length(years)
+      for (i in seq_along(years)) {
+        yr <- years[i]
+        incProgress(1/n, detail = paste("Year", yr))
+        result <- tryCatch(fetch_year_michelle(yr), error = function(e) NULL)
+        if (!is.null(result)) {
+          all_d[[as.character(yr)]] <- result$daily
+          all_h[[as.character(yr)]] <- result$hourly
+        }
+        Sys.sleep(0.3)
+      }
+    })
+    if (length(all_d) == 0) {
+      m_data$msg <- "No data returned."
+    } else {
+      prepped <- prep_michelle(all_d, all_h)
+      m_data$daily <- prepped$daily
+      m_data$annual <- prepped$annual
+      m_data$msg <- paste0(length(all_d), " years loaded.")
+    }
+  })
+
+  output$m_status <- renderText(m_data$msg)
+
+  m_daily_filt <- reactive({
+    req(m_data$daily)
+    m_data$daily |>
+      filter(year >= input$m_years[1], year <= input$m_years[2], month_num >= input$m_months[1], month_num <= input$m_months[2])
+  })
+
+  output$m_box <- renderPlot({
+    if (is.null(m_data$daily)) {
+      ggplot() +
+        annotate("text", x = .5, y = .5, label = "Select options and press\n'Scrape Data' to see the chart.", size = 5, color = "#9aa5b8", hjust = .5) +
+        theme_void() + xlim(0,1) + ylim(0,1)
+    } else {
+      req(nrow(m_daily_filt()) > 0)
+          ggplot(m_daily_filt(), aes(x = factor(year), y = range_f)) +
+            geom_boxplot(fill = "steelblue", alpha = 0.6, outlier.size = 1) +
+            labs(title = "Distribution of Daily Temperature Range by Year", x = "Year", y = "Temperature (\u00b0F)") +
+            theme_minimal(base_size = 13) +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    }
+  })
+
+  output$m_iqr <- renderPlot({
+    if (is.null(m_data$daily)) {
+      ggplot() +
+        annotate("text", x = .5, y = .5, label = "Select options and press\n'Scrape Data' to see the chart.", size = 5, color = "#9aa5b8", hjust = .5) +
+        theme_void() + xlim(0,1) + ylim(0,1)
+    } else {
+      req(nrow(m_daily_filt()) > 0)
+      m_daily_filt() |>
+        group_by(year) |>
+        summarise(
+          iqr = IQR(range_f, na.rm = TRUE),
+          q25 = quantile(range_f, 0.25, na.rm = TRUE),
+          q75 = quantile(range_f, 0.75, na.rm = TRUE),
+          median_range = median(range_f, na.rm = TRUE),
+          .groups = "drop"
+        ) |>
+        ggplot(aes(x = year)) +
+        geom_ribbon(aes(ymin = q25, ymax = q75), fill = "steelblue", alpha = 0.3) +
+        geom_line(aes(y = median_range), colour = "steelblue", linewidth = 1) +
+        geom_point(aes(y = iqr), colour = "tomato", size = 2.5) +
+        geom_smooth(aes(y = iqr), method = "lm", se = FALSE, colour = "tomato", linetype = "dashed", linewidth = 0.9) +
+        labs(title = "Interquartile Range of Day-to-Day Temperature Variability by Year", x = "Year", y = "Temperature (\u00b0F)") +
+        theme_minimal(base_size = 13)
+    }
+  })
+
+  output$m_stats <- renderUI({
+    req(nrow(m_daily_filt()) > 0)
+    df <- m_daily_filt() |>
+      group_by(year) |>
+      summarise(iqr = IQR(range_f, na.rm = TRUE), .groups = "drop")
+    model <- lm(iqr ~ year, data = df)
+    s <- summary(model)
+    coef <- s$coefficients
+    slope <- coef[2, 1]; pval <- coef[2, 4]; r2 <- s$r.squared
+    tagList(
+      p(strong("Slope (per year):"), sprintf("%.4f \u00b0F", slope)),
+      p(strong("p-value:"), sprintf("%.4f", pval),
+        if (pval < 0.05) " - statistically significant"
+        else " - not statistically significant"),
+      p(strong("R\u00b2:"), sprintf("%.4f", r2)),
+      p(strong(paste("IQR in", min(df$year), ":")),
+        sprintf("%.2f \u00b0F", df$iqr[df$year == min(df$year)])),
+      p(strong(paste("IQR in", max(df$year), ":")),
+        sprintf("%.2f \u00b0F", df$iqr[df$year == max(df$year)])),
+      p(strong("Total change:"),
+        sprintf("%.2f \u00b0F over %d years",
+          df$iqr[df$year == max(df$year)] - df$iqr[df$year == min(df$year)],
+          max(df$year) - min(df$year)))
+    )
+  })
+
+}
+
+shinyApp(ui, server)
+```
