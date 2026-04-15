@@ -625,15 +625,7 @@ server <- function(input, output, session) {
         scale_x_continuous(breaks = df$year) +
         labs(title  = paste0(input$i_precip, " in ", input$i_country), x = "Year", y = input$i_precip) +
         theme_minimal(base_size = 13) +
-        theme(
-          plot.title = element_text(face = "bold", color = "#1a2e4a", size = 14),
-          axis.text.x = element_text(angle = 35, hjust = 1, color = "#6b7a90"),
-          axis.text.y = element_text(color = "#6b7a90"),
-          axis.title = element_text(color = "#4b5563"),
-          panel.grid.minor = element_blank(),
-          panel.grid.major = element_line(color = "#eef0f5"),
-          plot.background = element_rect(fill = "white", color = NA)
-        )
+        theme_app()
     }
   })
 
@@ -669,7 +661,8 @@ server <- function(input, output, session) {
 
   output$i_analysis <- renderUI({
     HTML("<p style='font-size:13px;color:#5f5e5a;'>
-      ANALYSIS HERE
+      This graph measures the amount of precipitation in various locations around the globe, which can be switched between rainfall, snowfall, total, and hours of precipitation. Considering global warming has been linked with more intense precipitation patterns, we decided to look into asking how precipitation has changed in various locations over time. A significant change would indicate some kind of influencing factor, which could potentially be climate change. While the actual significance of any trends tend to vary for different parameters as shown above (including Spearman's coorelation measuring the strength of the relationship and R squared to measure variance), there are few statistically significant relationships from what I could find. One is a significant decrease in precipitation hours in germany and china over the years. 
+      However, precipitation measures aside from snowfall seem to consistently have a slight positive regression slope, which although not statistically significant does prove interesting and might require further insights into the data. One influencing factor might be the graph only taking 15 total yearly measures over the whole 70 year range, but this was done in an attempt to limit API calls and improve functionality of the app. 
     </p>")
   })
 
